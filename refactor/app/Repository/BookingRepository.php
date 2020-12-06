@@ -36,7 +36,6 @@ class BookingRepository extends BaseRepository
 
     protected $model;
     protected $mailer;
-    protected $logger;
 
     /**
      * @param Job $model
@@ -46,10 +45,6 @@ class BookingRepository extends BaseRepository
         parent::__construct($model);
         $this->mailer = $mailer;
         // Logger can be placed on the parent class as this would look like that it's going to be the same for every repository.
-        $this->logger = new Logger('admin_logger');
-
-        $this->logger->pushHandler(new StreamHandler(storage_path('logs/admin/laravel-' . date('Y-m-d') . '.log'), Logger::DEBUG));
-        $this->logger->pushHandler(new FirePHPHandler());
     }
 
     /**
@@ -58,32 +53,37 @@ class BookingRepository extends BaseRepository
      */
     public function getUsersJobs($user_id)
     {
-        $cuser = User::find($user_id);
-        $usertype = '';
-        $emergencyJobs = array();
-        $noramlJobs = array();
-        if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback')->whereIn('status', ['pending', 'assigned', 'started'])->orderBy('due', 'asc')->get();
-            $usertype = 'customer';
-        } elseif ($cuser && $cuser->is('translator')) {
-            $jobs = Job::getTranslatorJobs($cuser->id, 'new');
-            $jobs = $jobs->pluck('jobs')->all();
-            $usertype = 'translator';
-        }
-        if ($jobs) {
-            foreach ($jobs as $jobitem) {
-                if ($jobitem->immediate == 'yes') {
-                    $emergencyJobs[] = $jobitem;
-                } else {
-                    $noramlJobs[] = $jobitem;
-                }
-            }
-            $noramlJobs = collect($noramlJobs)->each(function ($item, $key) use ($user_id) {
-                $item['usercheck'] = Job::checkParticularJob($user_id, $item);
-            })->sortBy('due')->all();
+        $user_type = '';
+        $emergency_jobs = array();
+        $normal_jobs = array();
+
+        $current_user = User::findOrFail($user_id);
+
+        if ($current_user->is('customer')) {
+            $user_type = Config::get('constants.user.type.customer');;
+            //Model method that retrieves customer jobs.
+            $jobs = $current_user->getCustomerCurrentJobs();
+        } else if ($current_user->is('translator')) {
+            $usertype = Config::get('constants.user.type.translator');
+            //Model method that retrieves customer jobs.
+            $jobs = Job::getTranslatorNewJobs($current_user);
         }
 
-        return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'cuser' => $cuser, 'usertype' => $usertype];
+        if ($jobs) {
+            list($emg_col, $nml_col) = $jobs->partition(function($job) {
+                return $job->immediate = Config::get('constants.immediate.affirmative');
+            });
+
+            $emergency_jobs = $emg_col->all();
+            $normal_jobs = $nml_col->all();
+        }
+
+        return [
+            'emergency_jobs' => $emergency_jobs, 
+            'noraml_jobs'    => $normal_jobs, 
+            'current_user'   => $curent_user,
+            'user_type'      => $user_type
+        ];
     }
 
     /**
@@ -92,33 +92,45 @@ class BookingRepository extends BaseRepository
      */
     public function getUsersJobsHistory($user_id, Request $request)
     {
-        $page = $request->get('page');
-        if (isset($page)) {
-            $pagenum = $page;
-        } else {
-            $pagenum = "1";
-        }
-        $cuser = User::find($user_id);
-        $usertype = '';
-        $emergencyJobs = array();
-        $noramlJobs = array();
-        if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback', 'distance')->whereIn('status', ['completed', 'withdrawbefore24', 'withdrawafter24', 'timedout'])->orderBy('due', 'desc')->paginate(15);
-            $usertype = 'customer';
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => 0, 'pagenum' => 0];
-        } elseif ($cuser && $cuser->is('translator')) {
-            $jobs_ids = Job::getTranslatorJobsHistoric($cuser->id, 'historic', $pagenum);
-            $totaljobs = $jobs_ids->total();
-            $numpages = ceil($totaljobs / 15);
+        $page_num = 1;
+        $total_pages = 1;
 
-            $usertype = 'translator';
-
-            $jobs = $jobs_ids;
-            $noramlJobs = $jobs_ids;
-//            $jobs['data'] = $noramlJobs;
-//            $jobs['total'] = $totaljobs;
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => $numpages, 'pagenum' => $pagenum];
+        if (isEmpty($request->get('page'))) {
+            $page_num = $request->get('page');
         }
+
+        $current_user = User::findOrFail($user_id);
+        
+        $user_type = '';
+        $emergency_jobs = array();
+        $normal_jobs = array();
+
+        if ($current_user->is('customer')) {
+            $user_type = Config::get('constants.user.type.customer');;
+            $jobs = $current_user->getCustomerJobsHistory(
+                ['due', 'desc'], 
+                Config::get('constants.default.pageItemCount') // Provided with default value of 15.
+            );
+        } else if ($current_user->is('translator')) {
+            $user_type = Config::get('constants.user.type.translator');;
+            $jobs = Job::getTranslatorJobsHistoric($current_user->id, $page_num);
+        }
+
+        $total_jobs  = $jobs->total();
+
+        if ($total_jobs) {
+            $total_pages = ceil($total_jobs / Config::get('constants.default.pageItemCount'));    
+        }
+        
+        return [
+            'emergency_jobs' => $emergency_jobs,
+            'normal_jobs' => $normal_jobs, 
+            'jobs' => $jobs, 
+            'current_user' => $current_user, 
+            'user_type' => $user_type, 
+            'total_pages' => $num_pages, 
+            'page_num' => $page_num
+        ];
     }
 
     /**

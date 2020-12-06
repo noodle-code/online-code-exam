@@ -6,6 +6,7 @@ use Validator;
 use Illuminate\Database\Eloquent\Model;
 use DTApi\Exceptions\ValidationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Monolog\Logger;
 
 class BaseRepository
 {
@@ -20,12 +21,15 @@ class BaseRepository
      */
     protected $validationRules = [];
 
+    protected $logger;
+
     /**
      * @param Model $model
      */
     public function __construct(Model $model = null)
     {
         $this->model = $model;
+        $this->createLogger();
     }
 
     /**
@@ -202,4 +206,16 @@ class BaseRepository
         return true;
     }
 
+    protected function createLogger() {
+        $this->logger = new Logger('admin_logger');
+
+        $logFilePath = 'logs/admin/';
+        $logFilePath .= 'laravel-' . Carbon::now()->format('Y-m-d') . '.log';
+
+        $this->logger->pushHandler(
+            new StreamHandler(storage_path($lofFilePath), Logger::DEBUG)
+        );
+
+        $this->logger->pushHandler(new FirePHPHandler());
+    }
 }
